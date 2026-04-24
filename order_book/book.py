@@ -36,13 +36,44 @@ class OrderBook:
         self._asks: SortedDict[float, Deque[Order]] = SortedDict(_ask_sort_key)
         self._orders: dict[str, Order] = {}
 
+    def _available_liquidity(self, order: Order) -> float:
+        if order.side is Side.BUY:
+            if order.price is None:
+                return sum(o.remaining_qty for q in self._asks.values() for o in q)
+            return sum(
+                o.remaining_qty
+                for price, q in self._asks.items()
+                if price <= order.price
+                for o in q
+            )
+        if order.price is None:
+            return sum(o.remaining_qty for q in self._bids.values() for o in q)
+        return sum(
+            o.remaining_qty
+            for price, q in self._bids.items()
+            if price >= order.price
+            for o in q
+        )
+
     def submit(self, order: Order) -> List[Trade]:
         """Match against the opposite side; rest remainder for GTC limit orders."""
+        if (
+            order.time_in_force is TimeInForce.FOK
+            and self._available_liquidity(order) < order.quantity
+        ):
+            order.status = Status.CANCELLED
+            return []
         if order.side is Side.BUY:
             trades = self._match_buy(order)
         else:
             trades = self._match_sell(order)
         if order.remaining_qty > 0:
+            if order.order_type is OrderType.MARKET:
+                order.status = Status.CANCELLED
+                return trades
+            if order.time_in_force is TimeInForce.IOC:
+                order.status = Status.CANCELLED
+                return trades
             if (
                 order.order_type is OrderType.LIMIT
                 and order.time_in_force is TimeInForce.GTC

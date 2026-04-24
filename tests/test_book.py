@@ -159,3 +159,232 @@ def test_filled_resting_not_in_cancel_registry(
     book.submit(limit_order("buyer", Side.BUY, 10.0, 1.0))
     assert book.cancel_order("seller") is False
     assert book.cancel_order("buyer") is False
+
+
+def test_market_order_leftover_is_cancelled_and_does_not_rest(book: OrderBook) -> None:
+    book.submit(
+        Order(
+            order_id="ask-1",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    buy = Order(
+        order_id="mkt-buy",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        quantity=5.0,
+        price=None,
+        time_in_force=TimeInForce.GTC,
+    )
+    trades = book.submit(buy)
+    assert sum(t.quantity for t in trades) == 2.0
+    assert buy.remaining_qty == 3.0
+    assert buy.status is Status.CANCELLED
+    assert book.best_bid() is None
+
+
+def test_ioc_limit_buy_partial_fill_cancels_remainder_and_does_not_rest(
+    book: OrderBook,
+) -> None:
+    book.submit(
+        Order(
+            order_id="ask-1",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=3.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    ioc_buy = Order(
+        order_id="ioc-buy",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=10.0,
+        price=100.0,
+        time_in_force=TimeInForce.IOC,
+    )
+    trades = book.submit(ioc_buy)
+    assert len(trades) == 1
+    assert trades[0].quantity == 3.0
+    assert ioc_buy.filled_qty == 3.0
+    assert ioc_buy.status is Status.CANCELLED
+    assert book.best_bid() is None
+    assert book.snapshot(depth=5)["bids"] == []
+
+
+def test_ioc_limit_buy_no_cross_cancels_and_emits_no_trades(book: OrderBook) -> None:
+    book.submit(
+        Order(
+            order_id="ask-1",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=3.0,
+            price=105.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    ioc_buy = Order(
+        order_id="ioc-buy",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=10.0,
+        price=100.0,
+        time_in_force=TimeInForce.IOC,
+    )
+    trades = book.submit(ioc_buy)
+    assert trades == []
+    assert ioc_buy.filled_qty == 0.0
+    assert ioc_buy.status is Status.CANCELLED
+    assert book.best_bid() is None
+    assert book.snapshot(depth=5)["bids"] == []
+
+
+def test_fok_limit_buy_insufficient_liquidity_cancels_no_trades_and_leaves_asks_unchanged(
+    book: OrderBook,
+) -> None:
+    book.submit(
+        Order(
+            order_id="ask-100",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    book.submit(
+        Order(
+            order_id="ask-101",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=101.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    before = book.snapshot(depth=5)["asks"]
+    fok_buy = Order(
+        order_id="fok-buy",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=10.0,
+        price=101.0,
+        time_in_force=TimeInForce.FOK,
+    )
+    trades = book.submit(fok_buy)
+    assert trades == []
+    assert fok_buy.status is Status.CANCELLED
+    assert book.snapshot(depth=5)["asks"] == before
+
+
+def test_fok_limit_buy_exact_liquidity_fills_and_status_filled(book: OrderBook) -> None:
+    book.submit(
+        Order(
+            order_id="ask-100",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    book.submit(
+        Order(
+            order_id="ask-101",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=101.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    fok_buy = Order(
+        order_id="fok-buy",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        quantity=4.0,
+        price=101.0,
+        time_in_force=TimeInForce.FOK,
+    )
+    trades = book.submit(fok_buy)
+    assert sum(t.quantity for t in trades) == 4.0
+    assert fok_buy.status is Status.FILLED
+    assert book.snapshot(depth=5)["asks"] == []
+
+
+def test_market_buy_sweeps_two_ask_levels_and_clears_asks(book: OrderBook) -> None:
+    book.submit(
+        Order(
+            order_id="ask-100",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    book.submit(
+        Order(
+            order_id="ask-101",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=3.0,
+            price=101.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    mkt_buy = Order(
+        order_id="mkt-buy",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        quantity=5.0,
+        price=None,
+        time_in_force=TimeInForce.GTC,
+    )
+    trades = book.submit(mkt_buy)
+    assert len(trades) == 2
+    assert [t.quantity for t in trades] == [2.0, 3.0]
+    assert book.snapshot(depth=5)["asks"] == []
+
+
+def test_market_buy_larger_than_total_ask_liquidity_cancels_and_clears_asks(
+    book: OrderBook,
+) -> None:
+    book.submit(
+        Order(
+            order_id="ask-100",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=2.0,
+            price=100.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    book.submit(
+        Order(
+            order_id="ask-101",
+            side=Side.SELL,
+            order_type=OrderType.LIMIT,
+            quantity=3.0,
+            price=101.0,
+            time_in_force=TimeInForce.GTC,
+        )
+    )
+    mkt_buy = Order(
+        order_id="mkt-buy",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        quantity=10.0,
+        price=None,
+        time_in_force=TimeInForce.GTC,
+    )
+    trades = book.submit(mkt_buy)
+    assert len(trades) == 2
+    assert sum(t.quantity for t in trades) == 5.0
+    assert mkt_buy.status is Status.CANCELLED
+    assert book.snapshot(depth=5)["asks"] == []
